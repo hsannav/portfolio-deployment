@@ -412,7 +412,7 @@ if 'greedy_weights' not in st.session_state:
 if 'data_loaded_from_file' not in st.session_state:
     st.session_state.data_loaded_from_file = False
 
-st.markdown('<p class="main-header"># 📊 Biased-Randomized Portfolio Optimizer</p>', unsafe_allow_html=True)
+st.markdown('# 📊 Biased-Randomized Portfolio Optimizer', unsafe_allow_html=True)
 
 st.sidebar.header("⚙️ Configuration")
 

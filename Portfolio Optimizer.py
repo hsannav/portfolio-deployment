@@ -541,6 +541,10 @@ return_weight = st.sidebar.slider(
     help="Weight for absolute returns (ignoring risk)"
 )
 
+total_weight = sharpe_weight + return_weight
+sharpe_weight /= total_weight
+return_weight /= total_weight
+
 if sharpe_weight == 0 and return_weight == 0:
     st.sidebar.error("⚠️ At least one weight must be greater than 0")
 

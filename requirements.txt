@@ -6,7 +6,3 @@ yfinance
 datetime
 scipy
 plotly
-pickle
-os
-pathlib
-warnings

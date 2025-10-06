@@ -282,7 +282,7 @@ class BiasedRandomizedPortfolioOptimizer:
         index = min(index, n - 1)
         return sorted_list[index]
     
-    def biased_randomized_construction(self, beta=0.25, use_geometric=True):
+    def biased_randomized_construction(self, allocation_low, allocation_high, beta=0.25, use_geometric=True):
         n_assets = len(self.tickers)
         objective_values = []
         
@@ -313,7 +313,7 @@ class BiasedRandomizedPortfolioOptimizer:
                 break
             
             selected_assets.append(selected_idx)
-            allocation = remaining_weight * np.random.uniform(0.05, 0.60)
+            allocation = remaining_weight * np.random.uniform(allocation_low, allocation_high)
             weights[selected_idx] = allocation
             remaining_weight -= allocation
         
@@ -365,9 +365,9 @@ class BiasedRandomizedPortfolioOptimizer:
         
         for i in range(n_iterations):
             try:
-                weights = self.biased_randomized_construction(beta, use_geometric)
+                weights = self.biased_randomized_construction(allocation_low, allocation_high, beta, use_geometric)
                 
-                if apply_local_search and (obj > best_objective or np.random.random() < local_search_prop):
+                if apply_local_search and (obj > 0.9 * best_objective or np.random.random() < local_search_prop):
                     weights = self.local_search_optimization(weights)                
                 
                 ret, std, sharpe, obj = self.portfolio_performance(weights)
@@ -553,6 +553,8 @@ st.sidebar.subheader("🔧 Optimization Parameters")
 n_iterations = st.sidebar.slider("Number of iterations", 10, 2000, 500, step=10)
 beta = st.sidebar.slider("Beta parameter (β)", 0.01, 0.99, 0.25, step=0.01)
 use_geometric = st.sidebar.radio("Distribution type", ["Geometric", "Triangular"]) == "Geometric"
+allocation_low, allocation_high = st.slider("Probability allocation range", 0.0, 100.0, (0.05, 0.60), 
+                                            help="When allocating new weight, the remaining available weight will be allocated on a random proportion defined uniformly on this range")
 apply_local_search = st.sidebar.checkbox("Apply local search", value=True)
 local_search_prop = st.sidebar.slider("Local search proportion", 0.0, 1.0, 0.2, step=0.05) if apply_local_search else 0.0
 compare_greedy = st.sidebar.checkbox("Compare with greedy heuristic", value=True)

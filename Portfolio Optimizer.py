@@ -367,7 +367,7 @@ class BiasedRandomizedPortfolioOptimizer:
             try:
                 weights = self.biased_randomized_construction(beta, use_geometric)
                 
-                if apply_local_search and np.random.random() < local_search_prop:
+                if apply_local_search and (obj > best_objective or np.random.random() < local_search_prop):
                     weights = self.local_search_optimization(weights)                
                 
                 ret, std, sharpe, obj = self.portfolio_performance(weights)

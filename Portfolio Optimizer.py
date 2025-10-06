@@ -54,7 +54,8 @@ st.markdown("""
 class BiasedRandomizedPortfolioOptimizer:
     
     def __init__(self, tickers, start_date, end_date, risk_free_rate=0.02, data_dir='portfolio_data', 
-                 sharpe_weight=1.0, return_weight=0.0):
+                 sharpe_weight=1.0, return_weight=0.0, allocation_low=0.05, allocation_high=0.60
+                 ):
         self.tickers = tickers
         self.start_date = start_date
         self.end_date = end_date
@@ -67,6 +68,8 @@ class BiasedRandomizedPortfolioOptimizer:
         self.prices = None
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
+        self.allocation_low = allocation_low
+        self.allocation_high = allocation_high
         
     def _get_data_filename(self):
         tickers_str = '_'.join(sorted(self.tickers))[:50]
@@ -282,7 +285,7 @@ class BiasedRandomizedPortfolioOptimizer:
         index = min(index, n - 1)
         return sorted_list[index]
     
-    def biased_randomized_construction(self, allocation_low, allocation_high, beta=0.25, use_geometric=True):
+    def biased_randomized_construction(self, beta=0.25, use_geometric=True):
         n_assets = len(self.tickers)
         objective_values = []
         
@@ -313,7 +316,7 @@ class BiasedRandomizedPortfolioOptimizer:
                 break
             
             selected_assets.append(selected_idx)
-            allocation = remaining_weight * np.random.uniform(allocation_low, allocation_high)
+            allocation = remaining_weight * np.random.uniform(self.allocation_low, self.allocation_high)
             weights[selected_idx] = allocation
             remaining_weight -= allocation
         
@@ -365,12 +368,16 @@ class BiasedRandomizedPortfolioOptimizer:
         
         for i in range(n_iterations):
             try:
-                weights = self.biased_randomized_construction(allocation_low, allocation_high, beta, use_geometric)
+                weights = self.biased_randomized_construction(beta, use_geometric)
                 
-                if apply_local_search and (obj > 0.9 * best_objective or np.random.random() < local_search_prop):
+                if apply_local_search and np.random.random() < local_search_prop:
                     weights = self.local_search_optimization(weights)                
                 
                 ret, std, sharpe, obj = self.portfolio_performance(weights)
+
+                if apply_local_search and obj > 0.9 * best_objective:
+                    weights = self.local_search_optimization(weights)
+                    ret, std, sharpe, obj = self.portfolio_performance(weights)
                 
                 if not np.isnan(obj) and not np.isinf(obj):
                     all_solutions.append({
@@ -542,24 +549,22 @@ return_weight = st.sidebar.slider(
 )
 
 total_weight = sharpe_weight + return_weight
-sharpe_weight /= total_weight
-return_weight /= total_weight
-
 if sharpe_weight == 0 and return_weight == 0:
     st.sidebar.error("⚠️ At least one weight must be greater than 0")
+else:
+    sharpe_weight /= total_weight
+    return_weight /= total_weight
 
-# Optimization parameters
 st.sidebar.subheader("🔧 Optimization Parameters")
 n_iterations = st.sidebar.slider("Number of iterations", 10, 2000, 500, step=10)
 beta = st.sidebar.slider("Beta parameter (β)", 0.01, 0.99, 0.25, step=0.01)
 use_geometric = st.sidebar.radio("Distribution type", ["Geometric", "Triangular"]) == "Geometric"
-allocation_low, allocation_high = st.sidebar.slider("Probability allocation range", 0.0, 1.0, (0.05, 0.60), 
+allocation_low, allocation_high = st.sidebar.slider("Proportion allocation range", 0.0, 1.0, (0.05, 0.60), 
                                             help="When allocating new weight, the remaining available weight will be allocated on a random proportion defined uniformly on this range")
 apply_local_search = st.sidebar.checkbox("Apply local search", value=True)
 local_search_prop = st.sidebar.slider("Local search proportion", 0.0, 1.0, 0.2, step=0.05) if apply_local_search else 0.0
 compare_greedy = st.sidebar.checkbox("Compare with greedy heuristic", value=True)
 
-# Display mathematical formulation
 with st.expander("📐 Mathematical formulation", expanded=False):
     st.markdown("### Portfolio optimization model")
     
@@ -621,7 +626,6 @@ with st.expander("📐 Mathematical formulation", expanded=False):
         st.latex(r"k = \lfloor n(1 - \sqrt{U}) \rfloor")
         st.markdown("where $U \\sim \\text{Uniform}(0,1)$")
 
-# Run optimization button
 run_button_disabled = (sharpe_weight == 0 and return_weight == 0)
 
 if data_source == "New/Existing configuration":
@@ -635,7 +639,9 @@ if data_source == "New/Existing configuration":
                     risk_free_rate=risk_free_rate,
                     data_dir='portfolio_data',
                     sharpe_weight=sharpe_weight,
-                    return_weight=return_weight
+                    return_weight=return_weight,
+                    allocation_low=allocation_low,
+                    allocation_high=allocation_high
                 )
                 
                 st.info("📥 Fetching market data...")

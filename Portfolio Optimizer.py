@@ -1352,7 +1352,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
             st.info("No saved data files found.")
 
 elif st.session_state.data_loaded_from_file and st.session_state.optimizer is not None:
-    # Show loaded data info before optimization
     optimizer = st.session_state.optimizer
     
     st.info(f"✅ **Data loaded from file!** {len(optimizer.tickers)} stocks available. Configure optimization parameters and click 'Run optimization'.")
@@ -1372,7 +1371,6 @@ elif st.session_state.data_loaded_from_file and st.session_state.optimizer is no
         st.write(", ".join(optimizer.tickers))
 
 else:
-    # Welcome screen
     st.info("👈 Configure your portfolio parameters in the sidebar and click 'Run optimization' to begin!")
     
     st.markdown("""

@@ -4,6 +4,8 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 from scipy.optimize import minimize
+from scipy.cluster.hierarchy import linkage, to_tree
+from scipy.spatial.distance import squareform
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -14,7 +16,6 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# Page configuration
 st.set_page_config(
     page_title="Portfolio Optimizer",
     page_icon="📊",
@@ -22,7 +23,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
@@ -117,7 +117,6 @@ class BiasedRandomizedPortfolioOptimizer:
             return False
     
     def load_data_from_file(self, filepath):
-        """Load data from a specific file path"""
         try:
             with open(filepath, 'rb') as f:
                 data_dict = pickle.load(f)
@@ -235,6 +234,168 @@ class BiasedRandomizedPortfolioOptimizer:
         combined_objective = self.sharpe_weight * sharpe_ratio + self.return_weight * portfolio_return
         
         return portfolio_return, portfolio_std, sharpe_ratio, combined_objective
+    
+    
+    def equal_weight_portfolio(self):
+        n_assets = len(self.tickers)
+        weights = np.ones(n_assets) / n_assets
+        return weights
+    
+    def minimum_variance_portfolio(self):
+        n_assets = len(self.tickers)
+        
+        def portfolio_variance(weights):
+            return np.dot(weights.T, np.dot(self.cov_matrix.values * 252, weights))
+        
+        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+        bounds = tuple((0, 1) for _ in range(n_assets))
+        initial_weights = np.ones(n_assets) / n_assets
+        
+        try:
+            result = minimize(portfolio_variance, initial_weights, method='SLSQP',
+                            bounds=bounds, constraints=constraints,
+                            options={'maxiter': 1000, 'ftol': 1e-9})
+            
+            if result.success:
+                weights = np.clip(result.x, 0, 1)
+                weights = weights / np.sum(weights)
+                return weights
+            else:
+                return initial_weights
+        except:
+            return initial_weights
+    
+    def risk_parity_portfolio(self):
+        n_assets = len(self.tickers)
+        cov_matrix = self.cov_matrix.values * 252
+        
+        def risk_contribution(weights):
+            portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            marginal_contrib = np.dot(cov_matrix, weights)
+            risk_contrib = weights * marginal_contrib / portfolio_vol
+            return risk_contrib
+        
+        def risk_parity_objective(weights):
+            risk_contrib = risk_contribution(weights)
+            target = np.mean(risk_contrib)
+            return np.sum((risk_contrib - target) ** 2)
+        
+        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+        bounds = tuple((0, 1) for _ in range(n_assets))
+        initial_weights = np.ones(n_assets) / n_assets
+        
+        try:
+            result = minimize(risk_parity_objective, initial_weights, method='SLSQP',
+                            bounds=bounds, constraints=constraints,
+                            options={'maxiter': 1000, 'ftol': 1e-9})
+            
+            if result.success:
+                weights = np.clip(result.x, 0, 1)
+                weights = weights / np.sum(weights)
+                return weights
+            else:
+                return initial_weights
+        except:
+            return initial_weights
+    
+    def hierarchical_risk_parity(self):
+        try:
+            corr_matrix = self.returns.corr().values
+            
+            dist_matrix = np.sqrt((1 - corr_matrix) / 2)
+            np.fill_diagonal(dist_matrix, 0)
+            
+            dist_condensed = squareform(dist_matrix, checks=False)
+            linkage_matrix = linkage(dist_condensed, method='single')
+            
+            def get_quasi_diag(link):
+                link = link.astype(int)
+                sort_ix = pd.Series([link[-1, 0], link[-1, 1]])
+                num_items = link[-1, 3]
+                
+                while sort_ix.max() >= num_items:
+                    sort_ix.index = list(range(0, sort_ix.shape[0] * 2, 2))
+                    df0 = sort_ix[sort_ix >= num_items]
+                    i = df0.index
+                    j = df0.values - num_items
+                    sort_ix[i] = link[j, 0]
+                    df0 = pd.Series(link[j, 1], index=i + 1)
+                    sort_ix = pd.concat([sort_ix, df0])
+                    sort_ix = sort_ix.sort_index()
+                    sort_ix.index = list(range(sort_ix.shape[0]))
+                
+                return sort_ix.tolist()
+            
+            sort_ix = get_quasi_diag(linkage_matrix)
+            
+            cov_matrix = self.cov_matrix.values * 252
+            
+            def get_cluster_var(cov, c_items):
+                cov_slice = cov[np.ix_(c_items, c_items)]
+                w = np.linalg.inv(cov_slice).dot(np.ones(len(c_items)))
+                w /= w.sum()
+                return np.dot(w, np.dot(cov_slice, w))
+            
+            def get_rec_bipart(cov, sort_ix):
+                w = pd.Series(1.0, index=sort_ix)
+                c_items = [sort_ix]
+                
+                while len(c_items) > 0:
+                    c_items = [i[j:k] for i in c_items for j, k in ((0, len(i) // 2), (len(i) // 2, len(i))) if len(i) > 1]
+                    
+                    for i in range(0, len(c_items), 2):
+                        c_items0 = c_items[i]
+                        c_items1 = c_items[i + 1]
+                        
+                        c_var0 = get_cluster_var(cov, c_items0)
+                        c_var1 = get_cluster_var(cov, c_items1)
+                        
+                        alpha = 1 - c_var0 / (c_var0 + c_var1)
+                        
+                        w[c_items0] *= alpha
+                        w[c_items1] *= 1 - alpha
+                
+                return w
+            
+            weights_series = get_rec_bipart(cov_matrix, sort_ix)
+            weights = weights_series.values
+            weights = weights / np.sum(weights)
+            
+            return weights
+        except:
+            return self.equal_weight_portfolio()
+    
+    def maximum_diversification_portfolio(self):
+        """Maximum diversification portfolio"""
+        n_assets = len(self.tickers)
+        cov_matrix = self.cov_matrix.values * 252
+        volatilities = np.sqrt(np.diag(cov_matrix))
+        
+        def negative_diversification_ratio(weights):
+            portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            weighted_vol = np.dot(weights, volatilities)
+            if portfolio_vol == 0:
+                return 1e10
+            return -weighted_vol / portfolio_vol
+        
+        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+        bounds = tuple((0, 1) for _ in range(n_assets))
+        initial_weights = np.ones(n_assets) / n_assets
+        
+        try:
+            result = minimize(negative_diversification_ratio, initial_weights, method='SLSQP',
+                            bounds=bounds, constraints=constraints,
+                            options={'maxiter': 1000, 'ftol': 1e-9})
+            
+            if result.success:
+                weights = np.clip(result.x, 0, 1)
+                weights = weights / np.sum(weights)
+                return weights
+            else:
+                return initial_weights
+        except:
+            return initial_weights
+    
     
     def greedy_heuristic_sharpe(self):
         n_assets = len(self.tickers)
@@ -416,6 +577,8 @@ if 'all_solutions' not in st.session_state:
     st.session_state.all_solutions = None
 if 'greedy_weights' not in st.session_state:
     st.session_state.greedy_weights = None
+if 'benchmark_weights' not in st.session_state:
+    st.session_state.benchmark_weights = {}
 if 'data_loaded_from_file' not in st.session_state:
     st.session_state.data_loaded_from_file = False
 
@@ -423,7 +586,7 @@ st.markdown('# 📊 Biased-Randomized Portfolio Optimizer', unsafe_allow_html=Tr
 
 st.sidebar.header("⚙️ Configuration")
 
-st.sidebar.subheader("💾 Data Source")
+st.sidebar.subheader("💾 Data source")
 data_source = st.sidebar.radio(
     "Choose data source",
     ["New/Existing configuration", "Load from saved file"],
@@ -466,7 +629,7 @@ if data_source == "Load from saved file":
         if st.sidebar.button("📥 Load this file", type="primary"):
             with st.spinner("Loading data from file..."):
                 optimizer = BiasedRandomizedPortfolioOptimizer(
-                    tickers=['AAPL'], # To be overwritten
+                    tickers=['AAPL'],
                     start_date='2020-01-01',
                     end_date='2023-01-01',
                     data_dir='portfolio_data'
@@ -479,6 +642,7 @@ if data_source == "Load from saved file":
                     st.session_state.data_loaded_from_file = True
                     st.session_state.best_weights = None
                     st.session_state.all_solutions = None
+                    st.session_state.benchmark_weights = {}
                     st.success(f"✅ Data loaded successfully! {len(optimizer.tickers)} stocks loaded.")
                     st.rerun()
                 else:
@@ -488,7 +652,7 @@ if data_source == "Load from saved file":
         data_source = "New/Existing configuration"
 
 if data_source == "New/Existing configuration":
-    st.sidebar.subheader("📈 Stock Selection")
+    st.sidebar.subheader("📈 Stock selection")
     
     preset_portfolios = {
         "Tech giants": ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA'],
@@ -523,10 +687,8 @@ if data_source == "New/Existing configuration":
         step=0.1
     ) / 100
     
-    # Data management
     use_saved_data = st.sidebar.checkbox("Use saved data (if available)", value=True)
 
-# Objective function weights
 st.sidebar.subheader("🎯 Objective function weights")
 st.sidebar.markdown("Define the optimization objective as a weighted combination:")
 
@@ -563,7 +725,14 @@ allocation_low, allocation_high = st.sidebar.slider("Proportion allocation range
                                             help="When allocating new weight, the remaining available weight will be allocated on a random proportion defined uniformly on this range")
 apply_local_search = st.sidebar.checkbox("Apply local search", value=True)
 local_search_prop = st.sidebar.slider("Local search proportion", 0.0, 1.0, 0.2, step=0.05) if apply_local_search else 0.0
-compare_greedy = st.sidebar.checkbox("Compare with greedy heuristic", value=True)
+
+st.sidebar.subheader("📊 Benchmark Methods")
+compare_greedy = st.sidebar.checkbox("Greedy Heuristic", value=True)
+compare_equal_weight = st.sidebar.checkbox("Equal Weight (1/N)", value=True)
+compare_min_var = st.sidebar.checkbox("Minimum Variance", value=True)
+compare_risk_parity = st.sidebar.checkbox("Risk Parity", value=True)
+compare_hrp = st.sidebar.checkbox("Hierarchical Risk Parity (HRP)", value=True)
+compare_max_div = st.sidebar.checkbox("Maximum Diversification", value=True)
 
 with st.expander("📐 Mathematical formulation", expanded=False):
     st.markdown("### Portfolio optimization model")
@@ -629,7 +798,7 @@ with st.expander("📐 Mathematical formulation", expanded=False):
 run_button_disabled = (sharpe_weight == 0 and return_weight == 0)
 
 if data_source == "New/Existing configuration":
-    if st.sidebar.button("🚀 Run optimization", type="primary", disabled=run_button_disabled):
+    if st.sidebar.button("Run optimization", type="primary", disabled=run_button_disabled):
         with st.spinner("Initializing optimizer..."):
             try:
                 optimizer = BiasedRandomizedPortfolioOptimizer(
@@ -649,7 +818,7 @@ if data_source == "New/Existing configuration":
                 
                 st.success(f"✅ Data loaded: {len(optimizer.returns)} trading days")
                 
-                st.info("🔄 Running optimization algorithm...")
+                st.info("🔄 Running Biased-Randomization optimization...")
                 best_weights, best_objective, all_solutions = optimizer.multi_start_biased_randomization(
                     n_iterations=n_iterations,
                     beta=beta,
@@ -662,25 +831,44 @@ if data_source == "New/Existing configuration":
                 st.session_state.best_weights = best_weights
                 st.session_state.all_solutions = all_solutions
                 st.session_state.data_loaded_from_file = False
+                st.session_state.benchmark_weights = {}
                 
-                if compare_greedy:
-                    greedy_weights, _ = optimizer.greedy_heuristic_sharpe()
-                    st.session_state.greedy_weights = greedy_weights
+                with st.spinner("Computing benchmark portfolios..."):
+                    if compare_greedy:
+                        greedy_weights, _ = optimizer.greedy_heuristic_sharpe()
+                        st.session_state.greedy_weights = greedy_weights
+                        st.session_state.benchmark_weights['Greedy'] = greedy_weights
+                    
+                    if compare_equal_weight:
+                        st.session_state.benchmark_weights['Equal Weight'] = optimizer.equal_weight_portfolio()
+                    
+                    if compare_min_var:
+                        st.session_state.benchmark_weights['Min Variance'] = optimizer.minimum_variance_portfolio()
+                    
+                    if compare_risk_parity:
+                        st.session_state.benchmark_weights['Risk Parity'] = optimizer.risk_parity_portfolio()
+                    
+                    if compare_hrp:
+                        st.session_state.benchmark_weights['HRP'] = optimizer.hierarchical_risk_parity()
+                    
+                    if compare_max_div:
+                        st.session_state.benchmark_weights['Max Diversification'] = optimizer.maximum_diversification_portfolio()
                 
                 st.success("✅ Optimization completed!")
                 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
+                
 elif st.session_state.data_loaded_from_file and st.session_state.optimizer is not None:
     st.session_state.optimizer.sharpe_weight = sharpe_weight
     st.session_state.optimizer.return_weight = return_weight
     
-    if st.sidebar.button("🚀 Run optimization", type="primary", disabled=run_button_disabled):
+    if st.sidebar.button("Run optimization", type="primary", disabled=run_button_disabled):
         with st.spinner("Running optimization on loaded data..."):
             try:
                 optimizer = st.session_state.optimizer
                 
-                st.info("🔄 Running optimization algorithm...")
+                st.info("🔄 Running Biased-Randomization optimization...")
                 best_weights, best_objective, all_solutions = optimizer.multi_start_biased_randomization(
                     n_iterations=n_iterations,
                     beta=beta,
@@ -691,10 +879,28 @@ elif st.session_state.data_loaded_from_file and st.session_state.optimizer is no
                 
                 st.session_state.best_weights = best_weights
                 st.session_state.all_solutions = all_solutions
+                st.session_state.benchmark_weights = {}
                 
-                if compare_greedy:
-                    greedy_weights, _ = optimizer.greedy_heuristic_sharpe()
-                    st.session_state.greedy_weights = greedy_weights
+                with st.spinner("Computing benchmark portfolios..."):
+                    if compare_greedy:
+                        greedy_weights, _ = optimizer.greedy_heuristic_sharpe()
+                        st.session_state.greedy_weights = greedy_weights
+                        st.session_state.benchmark_weights['Greedy'] = greedy_weights
+                    
+                    if compare_equal_weight:
+                        st.session_state.benchmark_weights['Equal Weight'] = optimizer.equal_weight_portfolio()
+                    
+                    if compare_min_var:
+                        st.session_state.benchmark_weights['Min Variance'] = optimizer.minimum_variance_portfolio()
+                    
+                    if compare_risk_parity:
+                        st.session_state.benchmark_weights['Risk Parity'] = optimizer.risk_parity_portfolio()
+                    
+                    if compare_hrp:
+                        st.session_state.benchmark_weights['HRP'] = optimizer.hierarchical_risk_parity()
+                    
+                    if compare_max_div:
+                        st.session_state.benchmark_weights['Max Diversification'] = optimizer.maximum_diversification_portfolio()
                 
                 st.success("✅ Optimization completed!")
                 
@@ -706,6 +912,7 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
     best_weights = st.session_state.best_weights
     all_solutions = st.session_state.all_solutions
     greedy_weights = st.session_state.greedy_weights
+    benchmark_weights = st.session_state.benchmark_weights
     
     ret, std, sharpe, objective = optimizer.portfolio_performance(best_weights)
     
@@ -724,21 +931,37 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
     with col5:
         st.metric("Successful iterations", f"{len(all_solutions)}/{n_iterations}", delta=None)
     
-    # Comparison with greedy
-    if greedy_weights is not None:
-        ret_greedy, std_greedy, sharpe_greedy, obj_greedy = optimizer.portfolio_performance(greedy_weights)
-        improvement = ((objective - obj_greedy) / abs(obj_greedy)) * 100 if obj_greedy != 0 else 0
+    if benchmark_weights:
+        st.markdown("### 📊 Benchmark comparison")
         
-        st.info(f"📈 **Improvement over Greedy Heuristic:** {improvement:.2f}% | Greedy Objective: {obj_greedy:.4f} (Sharpe: {sharpe_greedy:.4f}, Return: {ret_greedy*100:.2f}%)")
+        comparison_data = []
+        comparison_data.append({
+            'Method': '🏆 Biased-Randomization',
+            'Return': f"{ret*100:.2f}%",
+            'Volatility': f"{std*100:.2f}%",
+            'Sharpe Ratio': f"{sharpe:.4f}",
+            'Objective': f"{objective:.4f}"
+        })
+        
+        for method_name, weights in benchmark_weights.items():
+            ret_b, std_b, sharpe_b, obj_b = optimizer.portfolio_performance(weights)
+            comparison_data.append({
+                'Method': method_name,
+                'Return': f"{ret_b*100:.2f}%",
+                'Volatility': f"{std_b*100:.2f}%",
+                'Sharpe Ratio': f"{sharpe_b:.4f}",
+                'Objective': f"{obj_b:.4f}"
+            })
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
     
-    # Tabs for different visualizations
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Portfolio allocation", "📈 Performance", "🎯 Efficient frontier", "📉 Risk analysis", "💾 Data info"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Portfolio allocation", "📈 Performance", "🎯 Efficient frontier", "📉 Risk analysis", "🔬 Method comparison", "💾 Data info"])
     
     with tab1:
         col1, col2 = st.columns(2)
         
         with col1:
-            # Pie chart
             weights_to_plot = best_weights[best_weights > 0.001]
             tickers_to_plot = [optimizer.tickers[i] for i, w in enumerate(best_weights) if w > 0.001]
             
@@ -750,13 +973,12 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
                 textposition='auto'
             )])
             fig_pie.update_layout(
-                title="Optimal portfolio allocation",
+                title="Optimal portfolio allocation (Biased-Randomization)",
                 height=500
             )
             st.plotly_chart(fig_pie, use_container_width=True)
         
         with col2:
-            # Bar chart
             fig_bar = go.Figure(data=[go.Bar(
                 x=optimizer.tickers,
                 y=best_weights,
@@ -774,7 +996,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
             )
             st.plotly_chart(fig_bar, use_container_width=True)
         
-        # Weights table
         st.markdown("### 📋 Detailed allocation")
         weights_df = pd.DataFrame({
             'Ticker': optimizer.tickers,
@@ -785,7 +1006,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
         st.dataframe(weights_df[weights_df['Weight'] > 0.001], use_container_width=True, hide_index=True)
     
     with tab2:
-        # Portfolio value over time
         portfolio_value = optimizer.calculate_portfolio_value(best_weights)
         
         fig_perf = go.Figure()
@@ -793,35 +1013,23 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
             x=portfolio_value.index,
             y=portfolio_value.values,
             mode='lines',
-            name='Optimal portfolio',
+            name='Biased-Randomization',
             line=dict(color='darkblue', width=3)
         ))
         
-        if greedy_weights is not None:
-            greedy_value = optimizer.calculate_portfolio_value(greedy_weights)
+        colors = ['orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray']
+        for idx, (method_name, weights) in enumerate(benchmark_weights.items()):
+            method_value = optimizer.calculate_portfolio_value(weights)
             fig_perf.add_trace(go.Scatter(
-                x=greedy_value.index,
-                y=greedy_value.values,
+                x=method_value.index,
+                y=method_value.values,
                 mode='lines',
-                name='Greedy portfolio',
-                line=dict(color='orange', width=2, dash='dash')
+                name=method_name,
+                line=dict(color=colors[idx % len(colors)], width=2, dash='dash')
             ))
         
-        # Add top 5 individual assets
-        for ticker in optimizer.tickers[:5]:
-            if ticker in optimizer.returns.columns:
-                asset_value = (1 + optimizer.returns[ticker]).cumprod()
-                fig_perf.add_trace(go.Scatter(
-                    x=asset_value.index,
-                    y=asset_value.values,
-                    mode='lines',
-                    name=ticker,
-                    line=dict(width=1),
-                    opacity=0.5
-                ))
-        
         fig_perf.update_layout(
-            title="Portfolio performance over time",
+            title="Portfolio performance over time - All methods",
             xaxis_title="Date",
             yaxis_title="Cumulative value",
             height=600,
@@ -829,7 +1037,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
         )
         st.plotly_chart(fig_perf, use_container_width=True)
         
-        # Rolling performance
         portfolio_returns = (optimizer.returns * best_weights).sum(axis=1)
         rolling_returns = portfolio_returns.rolling(window=30).mean()
         rolling_std = portfolio_returns.rolling(window=30).std()
@@ -892,7 +1099,7 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
             ),
             text=[f"Obj: {o:.3f}<br>Sharpe: {s:.3f}" for o, s in zip(objectives_data, sharpes_data)],
             hovertemplate='<b>Return:</b> %{y:.2%}<br><b>Risk:</b> %{x:.2%}<br>%{text}<extra></extra>',
-            name='Solutions'
+            name='BR Solutions'
         ))
         
         fig_frontier.add_trace(go.Scatter(
@@ -900,22 +1107,25 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
             y=[ret],
             mode='markers',
             marker=dict(size=20, color='red', symbol='star', line=dict(width=2, color='black')),
-            name='Best solution',
-            hovertemplate='<b>Best solution</b><br>Return: %{y:.2%}<br>Risk: %{x:.2%}<extra></extra>'
+            name='Best BR',
+            hovertemplate='<b>Best BR</b><br>Return: %{y:.2%}<br>Risk: %{x:.2%}<extra></extra>'
         ))
         
-        if greedy_weights is not None:
+        symbols = ['square', 'diamond', 'cross', 'x', 'triangle-up', 'triangle-down', 'pentagon']
+        for idx, (method_name, weights) in enumerate(benchmark_weights.items()):
+            ret_b, std_b, sharpe_b, obj_b = optimizer.portfolio_performance(weights)
             fig_frontier.add_trace(go.Scatter(
-                x=[std_greedy],
-                y=[ret_greedy],
+                x=[std_b],
+                y=[ret_b],
                 mode='markers',
-                marker=dict(size=20, color='orange', symbol='square', line=dict(width=2, color='black')),
-                name='Greedy solution',
-                hovertemplate='<b>Greedy solution</b><br>Return: %{y:.2%}<br>Risk: %{x:.2%}<extra></extra>'
+                marker=dict(size=15, color=colors[idx % len(colors)], symbol=symbols[idx % len(symbols)], 
+                           line=dict(width=2, color='black')),
+                name=method_name,
+                hovertemplate=f'<b>{method_name}</b><br>Return: %{{y:.2%}}<br>Risk: %{{x:.2%}}<extra></extra>'
             ))
         
         fig_frontier.update_layout(
-            title="Efficient frontier - all solutions",
+            title="Efficient frontier - All methods comparison",
             xaxis_title="Volatility (risk)",
             yaxis_title="Expected return",
             height=600,
@@ -923,7 +1133,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
         )
         st.plotly_chart(fig_frontier, use_container_width=True)
         
-        # Convergence plot
         iterations = [sol['iteration'] for sol in all_solutions]
         
         fig_conv = go.Figure()
@@ -937,10 +1146,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
         ))
         fig_conv.add_hline(y=objective, line_dash="dash", line_color="red", 
                           annotation_text=f"Best: {objective:.4f}", annotation_position="right")
-        
-        if greedy_weights is not None:
-            fig_conv.add_hline(y=obj_greedy, line_dash="dash", line_color="orange",
-                              annotation_text=f"Greedy: {obj_greedy:.4f}", annotation_position="left")
         
         fig_conv.update_layout(
             title="Convergence: objective value over iterations",
@@ -987,11 +1192,11 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
                 individual_sharpes.append(sharpe_ind)
             
             fig_sharpe = go.Figure()
-            colors = ['green' if s > 0 else 'red' for s in individual_sharpes]
+            colors_sharpe = ['green' if s > 0 else 'red' for s in individual_sharpes]
             fig_sharpe.add_trace(go.Bar(
                 x=optimizer.tickers,
                 y=individual_sharpes,
-                marker_color=colors,
+                marker_color=colors_sharpe,
                 text=[f"{s:.3f}" for s in individual_sharpes],
                 textposition='auto'
             ))
@@ -1007,7 +1212,6 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
             )
             st.plotly_chart(fig_sharpe, use_container_width=True)
         
-        # Covariance matrix
         fig_cov = go.Figure(data=go.Heatmap(
             z=optimizer.cov_matrix.values,
             x=optimizer.tickers,
@@ -1028,6 +1232,93 @@ if st.session_state.optimizer is not None and st.session_state.best_weights is n
         st.plotly_chart(fig_cov, use_container_width=True)
     
     with tab5:
+        st.markdown("### 🔬 Detailed method comparison")
+        
+        metrics_comparison = []
+        
+        metrics_comparison.append({
+            'Method': '🏆 Biased-Randomization',
+            'Return (%)': ret * 100,
+            'Volatility (%)': std * 100,
+            'Sharpe Ratio': sharpe,
+            'Objective': objective,
+            'Max Drawdown (%)': 0
+        })
+        
+        for method_name, weights in benchmark_weights.items():
+            ret_b, std_b, sharpe_b, obj_b = optimizer.portfolio_performance(weights)
+            metrics_comparison.append({
+                'Method': method_name,
+                'Return (%)': ret_b * 100,
+                'Volatility (%)': std_b * 100,
+                'Sharpe Ratio': sharpe_b,
+                'Objective': obj_b,
+                'Max Drawdown (%)': 0
+            })
+        
+        metrics_df = pd.DataFrame(metrics_comparison)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig_returns = go.Figure(data=[go.Bar(
+                x=metrics_df['Method'],
+                y=metrics_df['Return (%)'],
+                marker_color='lightblue',
+                text=metrics_df['Return (%)'].round(2),
+                textposition='auto'
+            )])
+            fig_returns.update_layout(
+                title="Expected Annual Returns comparison",
+                xaxis_title="Method",
+                yaxis_title="Return (%)",
+                height=400
+            )
+            st.plotly_chart(fig_returns, use_container_width=True)
+        
+        with col2:
+            fig_sharpes = go.Figure(data=[go.Bar(
+                x=metrics_df['Method'],
+                y=metrics_df['Sharpe Ratio'],
+                marker_color='lightgreen',
+                text=metrics_df['Sharpe Ratio'].round(3),
+                textposition='auto'
+            )])
+            fig_sharpes.update_layout(
+                title="Sharpe Ratio comparison",
+                xaxis_title="Method",
+                yaxis_title="Sharpe Ratio",
+                height=400
+            )
+            st.plotly_chart(fig_sharpes, use_container_width=True)
+        
+        fig_vol = go.Figure(data=[go.Bar(
+            x=metrics_df['Method'],
+            y=metrics_df['Volatility (%)'],
+            marker_color='salmon',
+            text=metrics_df['Volatility (%)'].round(2),
+            textposition='auto'
+        )])
+        fig_vol.update_layout(
+            title="Annual Volatility comparison",
+            xaxis_title="Method",
+            yaxis_title="Volatility (%)",
+            height=400
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+        
+        st.markdown("### 📊 Detailed metrics table")
+        st.dataframe(metrics_df.style.format({
+            'Return (%)': '{:.2f}',
+            'Volatility (%)': '{:.2f}',
+            'Sharpe Ratio': '{:.2f}',
+            'Max Drawdown (%)': '{:.2f}',
+            'Calmar Ratio': '{:.2f}',
+            'Sortino Ratio': '{:.2f}',
+            'Win Rate (%)': '{:.2f}'
+        }))
+
+    with tab6:
         st.markdown("### 📊 Current portfolio data")
         
         col1, col2 = st.columns(2)
@@ -1064,7 +1355,7 @@ elif st.session_state.data_loaded_from_file and st.session_state.optimizer is no
     # Show loaded data info before optimization
     optimizer = st.session_state.optimizer
     
-    st.info(f"✅ **Data loaded from file!** {len(optimizer.tickers)} stocks available. Configure optimization parameters and click 'Run Optimization'.")
+    st.info(f"✅ **Data loaded from file!** {len(optimizer.tickers)} stocks available. Configure optimization parameters and click 'Run optimization'.")
     
     st.markdown("### 📊 Loaded Portfolio Data")
     
@@ -1082,10 +1373,10 @@ elif st.session_state.data_loaded_from_file and st.session_state.optimizer is no
 
 else:
     # Welcome screen
-    st.info("👈 Configure your portfolio parameters in the sidebar and click '🚀 Run Optimization' to begin!")
+    st.info("👈 Configure your portfolio parameters in the sidebar and click 'Run optimization' to begin!")
     
     st.markdown("""
-    ### 🎯 About this tool
+    ### About this tool
     
     This application implements a **Biased-Randomized Portfolio Optimization** algorithm that combines:
     
@@ -1094,18 +1385,7 @@ else:
     - **Local search optimization** for solution refinement
     - **Flexible objective function** combining Sharpe ratio and raw returns
     
-    ### 📊 Features
-    
-    - ✅ Interactive stock selection with preset portfolios
-    - ✅ **Load saved data files directly** without manual configuration
-    - ✅ **Customizable objective function** (Sharpe ratio vs. raw returns)
-    - ✅ Real-time mathematical equation display
-    - ✅ Comprehensive visualization suite
-    - ✅ Comparison with greedy heuristic baseline
-    - ✅ Data caching for faster subsequent runs
-    - ✅ Fully customizable optimization parameters
-    
-    ### 🚀 Getting started
+    ### Getting started
     
     **Option 1: Load saved data**
     1. Select "Load from saved file" in the sidebar

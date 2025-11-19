@@ -43,7 +43,7 @@ The codebase is modularized into three main components to ensure separation of c
 1.  Clone the repository:
     ```bash
     git clone https://github.com/hsannav/portfolio-deployment.git
-    cd portfolio-optimizer
+    cd portfolio-deployment
     ```
 
 2.  Create a virtual environment (recommended):

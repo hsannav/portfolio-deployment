@@ -34,7 +34,7 @@ The core algorithm departs from traditional quadratic programming by using a bia
 
 The codebase is modularized into three main components to ensure separation of concerns:
 
-* `app.py`: The entry point for the Streamlit application. Handles user interface, state management, and interaction flow.
+* `Portfolio Optimizer.py`: The entry point for the Streamlit application. Handles user interface, state management, and interaction flow.
 * `financial_model.py`: Contains the core business logic, including data fetching, mathematical calculations, and the implementation of the optimization algorithms.
 * `visualization.py`: Dedicated module for generating Plotly charts and graphs, keeping the UI logic clean.
 
@@ -61,7 +61,7 @@ The codebase is modularized into three main components to ensure separation of c
 
 1.  Run the Streamlit application:
     ```bash
-    streamlit run app.py
+    streamlit run 'Portfolio Optimizer.py'
     ```
 
 2.  The application will open in your default web browser.

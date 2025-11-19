@@ -1,6 +1,6 @@
 # Biased-Randomized Portfolio Optimizer
 
-This project implements a heuristic algorithm for financial portfolio optimization. It utilizes a Biased-Randomized (BR) approach combined with Local Search to find optimal asset allocations, aiming to maximize the Sharpe Ratio and expected returns while managing risk. It is accesible at [https://portfolio-br.streamlit.app/](portfolio-br.streamlit.app).
+This project implements a heuristic algorithm for financial portfolio optimization. It utilizes a Biased-Randomized (BR) approach combined with Local Search to find optimal asset allocations, aiming to maximize the Sharpe Ratio and expected returns while managing risk. It is accesible at [portfolio-br.streamlit.app](https://portfolio-br.streamlit.app/).
 
 The application features an interactive web interface built with Streamlit, allowing users to configure parameters, select assets, and compare the custom algorithm against industry-standard benchmarks like Markowitz Mean-Variance, Risk Parity, and Hierarchical Risk Parity (HRP).
 

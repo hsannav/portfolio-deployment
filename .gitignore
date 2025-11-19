@@ -1,0 +1,5 @@
+.python-version
+pyproject.toml
+.devcontainer/*
+.venv/*
+__pycache__/*

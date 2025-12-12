@@ -7,6 +7,7 @@ from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 import pickle
 from pathlib import Path
+import copy
 
 class BiasedRandomizedPortfolioOptimizer:
     
@@ -471,8 +472,8 @@ class BiasedRandomizedPortfolioOptimizer:
             return initial_weights
     
     def multi_start_biased_randomization(self, n_iterations=50, beta=0.25, 
-                                       use_geometric=True, apply_local_search=True, local_search_prop=0.5,
-                                       progress_callback=None):
+                                     use_geometric=True, apply_local_search=True, local_search_prop=0.5,
+                                     progress_callback=None):
         best_weights = None
         best_objective = -np.inf
         all_solutions = []
@@ -512,7 +513,146 @@ class BiasedRandomizedPortfolioOptimizer:
         
         return best_weights, best_objective, all_solutions
     
-    def calculate_portfolio_value(self, weights):
-        portfolio_returns = (self.returns * weights).sum(axis=1)
-        portfolio_value = (1 + portfolio_returns).cumprod()
-        return portfolio_value
+class GeneticAlgorithmOptimizer(BiasedRandomizedPortfolioOptimizer):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def selection_tournament(self, population, fitnesses, tournament_size=3):
+        indices = np.random.choice(len(population), tournament_size, replace=False)
+        best_idx = indices[np.argmax(fitnesses[indices])]
+        return population[best_idx]
+
+    def selection_roulette_wheel(self, population, fitnesses):
+        min_fit = np.min(fitnesses)
+        adjusted_fitnesses = fitnesses - min_fit + 1e-6 
+        probs = adjusted_fitnesses / np.sum(adjusted_fitnesses)
+        idx = np.random.choice(len(population), p=probs)
+        return population[idx]
+
+    def crossover_arithmetic(self, parent1, parent2, alpha=0.5):
+        child1 = alpha * parent1 + (1 - alpha) * parent2
+        child2 = (1 - alpha) * parent1 + alpha * parent2
+        return child1, child2
+
+    def crossover_single_point(self, parent1, parent2):
+        point = np.random.randint(1, len(parent1))
+        child1 = np.concatenate([parent1[:point], parent2[point:]])
+        child2 = np.concatenate([parent2[:point], parent1[point:]])
+        return child1, child2
+
+    def crossover_uniform(self, parent1, parent2):
+        mask = np.random.rand(len(parent1)) < 0.5
+        child1 = np.where(mask, parent1, parent2)
+        child2 = np.where(mask, parent2, parent1)
+        return child1, child2
+
+    def mutate_gaussian(self, individual, mutation_rate=0.1, strength=0.1):
+        if np.random.random() < mutation_rate:
+            noise = np.random.normal(0, strength, size=len(individual))
+            individual += noise
+            individual = np.clip(individual, 0, 1)
+            if np.sum(individual) > 0:
+                 individual /= np.sum(individual)
+        return individual
+
+    def mutate_swap(self, individual, mutation_rate=0.1):
+        if np.random.random() < mutation_rate:
+            idx1, idx2 = np.random.choice(len(individual), 2, replace=False)
+            individual[idx1], individual[idx2] = individual[idx2], individual[idx1]
+        return individual
+    
+    def create_individual(self):
+        weights = np.random.random(len(self.tickers))
+        weights /= np.sum(weights)
+        return weights
+
+    def run_benchmark(self, configurations, n_generations=50, population_size=100, progress_callback=None):
+        results = {}
+        total_steps = len(configurations) * n_generations
+        current_step = 0
+
+        for config in configurations:
+            population = [self.create_individual() for _ in range(population_size)]
+            best_objective = -np.inf
+            best_weights = None
+            history = []
+
+            for gen in range(n_generations):
+                fitnesses = []
+                for ind in population:
+                    ind = np.clip(ind, 0, 1)
+                    if np.sum(ind) > 0:
+                        ind /= np.sum(ind)
+                    else:
+                        ind = self.equal_weight_portfolio()
+                    
+                    _, _, _, obj = self.portfolio_performance(ind)
+                    fitnesses.append(obj)
+                
+                fitnesses = np.array(fitnesses)
+                
+                gen_best_idx = np.argmax(fitnesses)
+                current_best_obj = fitnesses[gen_best_idx]
+                
+                if current_best_obj > best_objective:
+                    best_objective = current_best_obj
+                    best_weights = population[gen_best_idx].copy()
+                
+                history.append(best_objective)
+
+                new_population = []
+                elitism_count = config.get('elitism', 2)
+                sorted_indices = np.argsort(fitnesses)[::-1]
+                for i in range(elitism_count):
+                    new_population.append(population[sorted_indices[i]].copy())
+
+                while len(new_population) < population_size:
+                    sel_method = config.get('selection', 'Tournament')
+                    if sel_method == 'Roulette':
+                        parent1 = self.selection_roulette_wheel(population, fitnesses)
+                        parent2 = self.selection_roulette_wheel(population, fitnesses)
+                    else:
+                        parent1 = self.selection_tournament(population, fitnesses)
+                        parent2 = self.selection_tournament(population, fitnesses)
+                    
+                    if np.random.random() < config.get('crossover_rate', 0.8):
+                        cx_method = config.get('crossover', 'Arithmetic')
+                        if cx_method == 'Single Point':
+                            c1, c2 = self.crossover_single_point(parent1, parent2)
+                        elif cx_method == 'Uniform':
+                            c1, c2 = self.crossover_uniform(parent1, parent2)
+                        else:
+                            c1, c2 = self.crossover_arithmetic(parent1, parent2)
+                    else:
+                        c1, c2 = parent1.copy(), parent2.copy()
+
+                    mut_rate = config.get('mutation_rate', 0.1)
+                    mut_method = config.get('mutation', 'Gaussian')
+                    
+                    if mut_method == 'Swap':
+                        c1 = self.mutate_swap(c1, mut_rate)
+                        c2 = self.mutate_swap(c2, mut_rate)
+                    else:
+                        c1 = self.mutate_gaussian(c1, mut_rate)
+                        c2 = self.mutate_gaussian(c2, mut_rate)
+
+                    new_population.append(c1)
+                    if len(new_population) < population_size:
+                        new_population.append(c2)
+                
+                population = new_population
+                
+                current_step += 1
+                if progress_callback:
+                    progress_callback(current_step / total_steps, f"Running {config['name']} (Gen {gen+1})")
+            
+            ret, std, sharpe, _ = self.portfolio_performance(best_weights)
+            results[config['name']] = {
+                'weights': best_weights,
+                'objective': best_objective,
+                'history': history,
+                'metrics': {'Return': ret, 'Risk': std, 'Sharpe': sharpe}
+            }
+            
+        return results
